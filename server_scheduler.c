@@ -177,56 +177,56 @@ void calculate_metrics(float *max_cpu, float *avg_cpu, float *max_db, float *avg
 
     fclose(logfile);
 }
-// void calculate_metrics(float *max_cpu, float *avg_cpu, float *max_db, float *avg_db, float *max_mem, float *avg_mem) {
-//     FILE *logfile = fopen(LOG_FILE, "r");
-//     if (logfile == NULL) {
-//         perror("Unable to open log file");
-//         exit(EXIT_FAILURE);
-//     }
+void calculate_metrics(float *max_cpu, float *avg_cpu, float *max_db, float *avg_db, float *max_mem, float *avg_mem) {
+    FILE *logfile = fopen(LOG_FILE, "r");
+    if (logfile == NULL) {
+        perror("Unable to open log file");
+        exit(EXIT_FAILURE);
+    }
 
-//     int count = 0;
-//     char buffer[256];
-//     float cpu_usage, db_usage_abs, db_usage, memory_usage_abs, memory_usage;
-//     *max_cpu = *max_db = *max_mem = 0;
-//     *avg_cpu = *avg_db = *avg_mem = 0;
+    int count = 0;
+    char buffer[256];
+    float cpu_usage, db_usage_abs, db_usage, memory_usage_abs, memory_usage;
+    *max_cpu = *max_db = *max_mem = 0;
+    *avg_cpu = *avg_db = *avg_mem = 0;
 
-//     time_t now;
-//     time(&now);
-//     struct tm *local = localtime(&now);
-//     local->tm_min -= 5;
-//     time_t threshold_time = mktime(local);
+    time_t now;
+    time(&now);
+    struct tm *local = localtime(&now);
+    local->tm_min -= 5;
+    time_t threshold_time = mktime(local);
 
-//     while (fgets(buffer, sizeof(buffer), logfile)) {
-//         struct tm log_time;
-//         sscanf(buffer, "[%d-%d-%d %d:%d:%d] CPU: %f%%, DB: %f(%f%%), Memory: %fMB(%f%%)", 
-//             &log_time.tm_year, &log_time.tm_mon, &log_time.tm_mday,
-//             &log_time.tm_hour, &log_time.tm_min, &log_time.tm_sec,
-//             &cpu_usage, &db_usage_abs, &db_usage, &memory_usage_abs, &memory_usage);
+    while (fgets(buffer, sizeof(buffer), logfile)) {
+        struct tm log_time;
+        sscanf(buffer, "[%d-%d-%d %d:%d:%d] CPU: %f%%, DB: %f(%f%%), Memory: %fMB(%f%%)", 
+            &log_time.tm_year, &log_time.tm_mon, &log_time.tm_mday,
+            &log_time.tm_hour, &log_time.tm_min, &log_time.tm_sec,
+            &cpu_usage, &db_usage_abs, &db_usage, &memory_usage_abs, &memory_usage);
 
-//         log_time.tm_year -= 1900;
-//         log_time.tm_mon -= 1;
-//         time_t log_timestamp = mktime(&log_time);
+        log_time.tm_year -= 1900;
+        log_time.tm_mon -= 1;
+        time_t log_timestamp = mktime(&log_time);
 
-//         if (difftime(log_timestamp, threshold_time) >= 0) {
-//             if (cpu_usage > *max_cpu) *max_cpu = cpu_usage;
-//             if (db_usage > *max_db) *max_db = db_usage;
-//             if (memory_usage > *max_mem) *max_mem = memory_usage;
+        if (difftime(log_timestamp, threshold_time) >= 0) {
+            if (cpu_usage > *max_cpu) *max_cpu = cpu_usage;
+            if (db_usage > *max_db) *max_db = db_usage;
+            if (memory_usage > *max_mem) *max_mem = memory_usage;
 
-//             *avg_cpu += cpu_usage;
-//             *avg_db += db_usage;
-//             *avg_mem += memory_usage;
-//             count++;
-//         }
-//     }
+            *avg_cpu += cpu_usage;
+            *avg_db += db_usage;
+            *avg_mem += memory_usage;
+            count++;
+        }
+    }
 
-//     if (count > 0) {
-//         *avg_cpu /= count;
-//         *avg_db /= count;
-//         *avg_mem /= count;
-//     }
+    if (count > 0) {
+        *avg_cpu /= count;
+        *avg_db /= count;
+        *avg_mem /= count;
+    }
 
-//     fclose(logfile);
-// }
+    fclose(logfile);
+}
 
 float random_float() {
     return ((float)rand() / (float)RAND_MAX) * 100.0;
