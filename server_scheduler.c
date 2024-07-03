@@ -1,47 +1,72 @@
-#include <stdio.h>
+#define _POSIX_SOURCE
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/wait.h>
 #include <mysql/mysql.h>
+#include <ctype.h>
 
 #define LOG_FILE "server_status.log"
 #define DB_HOST "192.168.0.253"
 #define DB_PORT 3307
 #define DB_USER "today_chicken"
 #define DB_PASS "1q2w3e4r"
-#define DB_NAME "server_statistic_db"
+#define STATIS_DB_NAME "server_statistic_db"
+#define LOG_DB_NAME "log_db"
 
-// CPU 사용량을 측정하는 함수
-void get_cpu_usage(float *usage, float *total_usage) {
-    static long long last_idle = 0, last_total = 0;
-    FILE* file = fopen("/proc/stat", "r");
-    if (file == NULL) {
-        *usage = -1;
-        *total_usage = -1;
-        return;
+typedef struct statistic {
+    int login_user_max;
+    double login_user_avg;
+
+    int tps_max;
+    double tps_avg;
+
+    double mem_usage_max;
+    double mem_usage_avg;
+} statistic_t;
+
+void fix_log_time_pairs(MYSQL* log_conn) {
+    char SQL_buf[512];
+
+    snprintf(SQL_buf, sizeof(SQL_buf), "UPDATE client_log SET logout_time = NOW() WHERE logout_time IS NULL");
+    if (mysql_query(log_conn, SQL_buf)) {
+        fprintf(stderr, "UPDATE client_log failed: %s\n", mysql_error(log_conn));
     }
 
-    char buffer[256];
-    fgets(buffer, sizeof(buffer), file);
-    fclose(file);
-
-    long long user, nice, system, idle, iowait, irq, softirq;
-    sscanf(buffer, "cpu %lld %lld %lld %lld %lld %lld %lld", &user, &nice, &system, &idle, &iowait, &irq, &softirq);
-
-    long long idle_time = idle;
-    long long total_time = user + nice + system + idle + iowait + irq + softirq;
-
-    if (last_total != 0) {
-        *usage = (float)(total_time - last_total - (idle_time - last_idle)) / (total_time - last_total) * 100.0;
-    } else {
-        *usage = 0.0;
+    snprintf(SQL_buf, sizeof(SQL_buf), "UPDATE server_log SET downtime = NOW() WHERE downtime IS NULL");
+    if (mysql_query(log_conn, SQL_buf)) {
+        fprintf(stderr, "UPDATE server_log server_status failed: %s\n", mysql_error(log_conn));
     }
 
-    *total_usage = total_time - idle_time;
+    snprintf(SQL_buf, sizeof(SQL_buf), "INSERT INTO server_log (uptime) VALUES (NOW())");
+    if (mysql_query(log_conn, SQL_buf)) {
+        fprintf(stderr, "UPDATE server_log timestamp failed: %s\n", mysql_error(log_conn));
+    }
+}
 
-    last_total = total_time;
-    last_idle = idle_time;
+void handle_signal(int sig) {
+    if (sig == SIGTERM || sig == SIGKILL || sig == SIGSEGV || sig == SIGABRT) {
+        printf("Child received signal %d, terminating\n", sig);
+        exit(0);
+    }
+}
+
+void setup_signal_handlers() {
+    struct sigaction sa;
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGKILL, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
 }
 
 // 메모리 사용량을 측정하는 함수
@@ -66,29 +91,60 @@ void get_memory_usage(float *usage, float *total_usage) {
     fclose(file);
 }
 
-// 보조기억장치 사용량을 측정하는 함수 (가상)
-void get_db_usage(float *usage, float *total_usage) {
-    // 가상 데이터 생성
-    *usage = (float)(rand() % 100);
-    *total_usage = *usage;
+int get_login_user_cnt(MYSQL* log_conn) {
+    const static char* LOGIN_USER_CNT_QUERY = "SELECT COUNT(*) AS active_users FROM client_log WHERE login_time IS NOT NULL AND logout_time IS NULL";
+    MYSQL_ROW row;
+    MYSQL_RES *res = NULL;
+    
+    if (mysql_query(log_conn, LOGIN_USER_CNT_QUERY)) {
+        fprintf(stderr, "INSERT error: %s\n", mysql_error(log_conn));
+        return -1;
+    }
+
+    res = mysql_store_result(log_conn);
+    if (res == NULL) {
+        fprintf(stderr, "mysql_store_result failed: %s\n", mysql_error(log_conn));
+        return -1;
+    }
+    if ((row = mysql_fetch_row(res)) == NULL) {
+        return -1;
+    }
+    int result = atoi(row[0]);
+    mysql_free_result(res);
+    return result;
 }
 
+int get_tps(MYSQL* log_conn) {
+    const static char* TPS_QUERY = "SELECT COUNT(*) FROM message_log WHERE timestamp >= NOW() - INTERVAL 5 MINUTE";
+    MYSQL_ROW row;
+    MYSQL_RES *res = NULL;
+    
+    if (mysql_query(log_conn, TPS_QUERY)) {
+        fprintf(stderr, "INSERT error: %s\n", mysql_error(log_conn));
+        return -1;
+    }
+
+    res = mysql_store_result(log_conn);
+    if (res == NULL) {
+        fprintf(stderr, "mysql_store_result failed: %s\n", mysql_error(log_conn));
+        return -1;
+    }
+    if ((row = mysql_fetch_row(res)) == NULL) {
+        return -1;
+    }
+    int result = atoi(row[0]);
+    mysql_free_result(res);
+    return result;
+}
+
+
 // log.txt 파일에 로그를 남기는 함수
-void log_usage() {
-    printf("logging\n");
+void log_usage(int login_user_cnt, int tps, float memory_usage) {
     FILE *logfile = fopen(LOG_FILE, "a");
     if (logfile == NULL) {
         perror("Unable to open log file");
         exit(EXIT_FAILURE);
     }
-
-    float cpu_usage, cpu_total_usage;
-    float memory_usage, memory_total_usage;
-    float db_usage, db_total_usage;
-
-    get_cpu_usage(&cpu_usage, &cpu_total_usage);
-    get_memory_usage(&memory_usage, &memory_total_usage);
-    get_db_usage(&db_usage, &db_total_usage);
 
     time_t now;
     time(&now);
@@ -96,183 +152,153 @@ void log_usage() {
     char time_str[20];
     strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", local);
 
-    fprintf(logfile, "[%s] CPU: %.2f%%, DB: %.2f(%.2f%%), Memory: %.1fMB(%.2f%%)\n", 
-            time_str, cpu_usage, db_total_usage, db_usage, memory_total_usage / 1000, memory_usage);
-
-    fclose(logfile);
-    printf("logging done\n");
-}
-
-// 로그 파일을 읽고 최대값과 평균값을 계산하는 함수
-void calculate_metrics(float *max_cpu, float *avg_cpu, float *max_db, float *avg_db, float *max_mem, float *avg_mem) {
-    FILE *logfile = fopen(LOG_FILE, "r");
-    if (logfile == NULL) {
-        perror("Unable to open log file");
-        exit(EXIT_FAILURE);
-    }
-
-    fseek(logfile, 0, SEEK_END);
-    long file_size = ftell(logfile);
-    long pos = file_size;
-    int count = 0;
-    char buffer[256];
-    float cpu_usage, db_usage_abs, db_usage, memory_usage_abs, memory_usage;
-    *max_cpu = *max_db = *max_mem = 0;
-    *avg_cpu = *avg_db = *avg_mem = 0;
-
-    // Read the file in reverse
-    while (pos > 0 && count < 10) {
-        fseek(logfile, --pos, SEEK_SET);
-
-        if (fgetc(logfile) == '\n') {
-            fgets(buffer, sizeof(buffer), logfile);
-            struct tm log_time;
-            sscanf(buffer, "[%d-%d-%d %d:%d:%d] CPU: %f%%, DB: %f(%f%%), Memory: %fMB(%f%%)", 
-                   &log_time.tm_year, &log_time.tm_mon, &log_time.tm_mday,
-                   &log_time.tm_hour, &log_time.tm_min, &log_time.tm_sec,
-                   &cpu_usage, &db_usage_abs, &db_usage, &memory_usage_abs, &memory_usage);
-
-            log_time.tm_year -= 1900;
-            log_time.tm_mon -= 1;
-
-            if (cpu_usage > *max_cpu) *max_cpu = cpu_usage;
-            if (db_usage > *max_db) *max_db = db_usage;
-            if (memory_usage > *max_mem) *max_mem = memory_usage;
-
-            *avg_cpu += cpu_usage;
-            *avg_db += db_usage;
-            *avg_mem += memory_usage;
-            count++;
-        }
-
-        if (pos == 1) {
-            fseek(logfile, 0, SEEK_SET);
-            fgets(buffer, sizeof(buffer), logfile);
-            struct tm log_time;
-            sscanf(buffer, "[%d-%d-%d %d:%d:%d] CPU: %f%%, DB: %f(%f%%), Memory: %fMB(%f%%)", 
-                   &log_time.tm_year, &log_time.tm_mon, &log_time.tm_mday,
-                   &log_time.tm_hour, &log_time.tm_min, &log_time.tm_sec,
-                   &cpu_usage, &db_usage_abs, &db_usage, &memory_usage_abs, &memory_usage);
-
-            log_time.tm_year -= 1900;
-            log_time.tm_mon -= 1;
-
-            if (cpu_usage > *max_cpu) *max_cpu = cpu_usage;
-            if (db_usage > *max_db) *max_db = db_usage;
-            if (memory_usage > *max_mem) *max_mem = memory_usage;
-
-            *avg_cpu += cpu_usage;
-            *avg_db += db_usage;
-            *avg_mem += memory_usage;
-            count++;
-            break;
-        }
-    }
-
-    if (count > 0) {
-        *avg_cpu /= count;
-        *avg_db /= count;
-        *avg_mem /= count;
-    }
+    fprintf(logfile, "[%s] %d %d %.3f%%\n", time_str, login_user_cnt, tps, memory_usage);
 
     fclose(logfile);
 }
-void calculate_metrics(float *max_cpu, float *avg_cpu, float *max_db, float *avg_db, float *max_mem, float *avg_mem) {
-    FILE *logfile = fopen(LOG_FILE, "r");
-    if (logfile == NULL) {
-        perror("Unable to open log file");
-        exit(EXIT_FAILURE);
+
+int get_statistic(statistic_t* server_statistic) {
+    FILE *file = fopen(LOG_FILE, "r");
+    if (!file) {
+        perror("Failed to open log file");
+        return 1;
     }
 
+    int fd = fileno(file);
+    if (flock(fd, LOCK_SH) == -1) {
+        perror("Failed to lock file");
+        fclose(file);
+        return 1;
+    }
+
+    int login_user_max = 0, tps_max = 0;
+    double mem_usage_max = 0.0;
+    long login_user_sum = 0, tps_sum = 0;
+    double mem_usage_sum = 0.0;
     int count = 0;
-    char buffer[256];
-    float cpu_usage, db_usage_abs, db_usage, memory_usage_abs, memory_usage;
-    *max_cpu = *max_db = *max_mem = 0;
-    *avg_cpu = *avg_db = *avg_mem = 0;
 
-    time_t now;
-    time(&now);
-    struct tm *local = localtime(&now);
-    local->tm_min -= 5;
-    time_t threshold_time = mktime(local);
-
-    while (fgets(buffer, sizeof(buffer), logfile)) {
-        struct tm log_time;
-        sscanf(buffer, "[%d-%d-%d %d:%d:%d] CPU: %f%%, DB: %f(%f%%), Memory: %fMB(%f%%)", 
+    char line[256];
+    char last_line[256] = {0};
+    struct tm log_time;
+    while (fgets(line, sizeof(line), file)) {
+        int login_user, tps;
+        double mem_usage;
+        sscanf(line, "[%d-%d-%d %d:%d:%d] %d %d %lf%%", 
             &log_time.tm_year, &log_time.tm_mon, &log_time.tm_mday,
             &log_time.tm_hour, &log_time.tm_min, &log_time.tm_sec,
-            &cpu_usage, &db_usage_abs, &db_usage, &memory_usage_abs, &memory_usage);
+            &login_user, &tps, &mem_usage);
 
-        log_time.tm_year -= 1900;
-        log_time.tm_mon -= 1;
-        time_t log_timestamp = mktime(&log_time);
+        if (login_user > login_user_max) login_user_max = login_user;
+        if (tps > tps_max) tps_max = tps;
+        if (mem_usage > mem_usage_max) mem_usage_max = mem_usage;
 
-        if (difftime(log_timestamp, threshold_time) >= 0) {
-            if (cpu_usage > *max_cpu) *max_cpu = cpu_usage;
-            if (db_usage > *max_db) *max_db = db_usage;
-            if (memory_usage > *max_mem) *max_mem = memory_usage;
+        login_user_sum += login_user;
+        tps_sum += tps;
+        mem_usage_sum += mem_usage;
 
-            *avg_cpu += cpu_usage;
-            *avg_db += db_usage;
-            *avg_mem += memory_usage;
-            count++;
-        }
+        count++;
+
+        // Copy current line to last_line
+        strncpy(last_line, line, sizeof(last_line) - 1);
+        last_line[sizeof(last_line) - 1] = '\0'; // Ensure null-terminated string
     }
+
+    flock(fd, LOCK_UN);
+    fclose(file);
 
     if (count > 0) {
-        *avg_cpu /= count;
-        *avg_db /= count;
-        *avg_mem /= count;
+        server_statistic->login_user_max = login_user_max;
+        server_statistic->login_user_avg = (double)login_user_sum / count;
+        server_statistic->tps_max = tps_max;
+        server_statistic->tps_avg = (double)tps_sum / count;
+        server_statistic->mem_usage_max = mem_usage_max;
+        server_statistic->mem_usage_avg = mem_usage_sum / count;
+    } else {
+        printf("No data to process.\n");
+    }
+    // Clear the log file
+    file = fopen(LOG_FILE, "w");
+    if (!file) {
+        perror("Failed to clear log file");
+        return 1;
+    }
+    
+    fd = fileno(file);
+    if (flock(fd, LOCK_SH) == -1) {
+        perror("Failed to lock file");
+        fclose(file);
+        return 1;
     }
 
-    fclose(logfile);
+    if (strlen(last_line) > 0) {
+        fprintf(file, "%s", last_line);
+    }
+
+    flock(fd, LOCK_UN);
+    fclose(file);
+
+    return 0;
 }
 
-float random_float() {
-    return ((float)rand() / (float)RAND_MAX) * 100.0;
-}
-
-// 결과를 DB에 저장하는 함수
-void save_to_db(float max_cpu, float avg_cpu, float max_db, float avg_db, float max_mem, float avg_mem) {
+void save_statistic_to_db(MYSQL* statistic_conn, statistic_t* server_statistic) {
     printf("save_to_db\n");
-    MYSQL *conn = mysql_init(NULL);
-    if (conn == NULL) {
-        fprintf(stderr, "mysql_init() failed\n");
-        return;
-    }
-    printf("mysql_real_connect start\n");
-    if (mysql_real_connect(conn, DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT, NULL, 0) == NULL) {
-        fprintf(stderr, "mysql_real_connect() failed\n");
-        mysql_close(conn);
-        return;
-    }
-    printf("mysql_real_connect end\n");
+
     char query[512];
     snprintf(query, sizeof(query),
-            "INSERT INTO statistic (tps_avg, tps_max, mem_avg, mem_max, login_user_cnt_avg, login_user_cnt_max, log_timestamp) VALUES (%f, %f, %f, %f, %f, %f, NOW())"
-            ,random_float(), random_float(), max_mem, avg_mem, random_float(), random_float());
+            "INSERT INTO statistic (tps_avg, tps_max, mem_avg, mem_max, login_user_cnt_avg, login_user_cnt_max, log_timestamp) VALUES (%f, %d, %f, %f, %f, %d, NOW())",
+            server_statistic->tps_avg, server_statistic->tps_max, 
+            server_statistic->mem_usage_avg, server_statistic->mem_usage_max, 
+            server_statistic->login_user_avg, server_statistic->login_user_max);
     printf("%s\n", query);
-    if (mysql_query(conn, query)) {
-        fprintf(stderr, "INSERT error: %s\n", mysql_error(conn));
+    if (mysql_query(statistic_conn, query)) {
+        fprintf(stderr, "INSERT error: %s\n", mysql_error(statistic_conn));
     }
-    printf("auery success\n");
-    mysql_close(conn);
 }
 
 int main() {
     time_t start_time = time(NULL);
     time_t current_time;
+    MYSQL* statistic_conn = mysql_init(NULL);
+    MYSQL* log_conn = mysql_init(NULL);
+    
+    setup_signal_handlers();
+    if (statistic_conn == NULL || log_conn == NULL) {
+        fprintf(stderr, "mysql_init() failed\n");
+        return -1;
+    }
+    printf("mysql_real_connect start\n");
+    if (mysql_real_connect(statistic_conn, DB_HOST, DB_USER, DB_PASS, STATIS_DB_NAME, DB_PORT, NULL, 0) == NULL) {
+        fprintf(stderr, "mysql_real_connect() failed\n");
+        mysql_close(statistic_conn);
+        return -1;
+    }
+    if (mysql_real_connect(log_conn, DB_HOST, DB_USER, DB_PASS, LOG_DB_NAME, DB_PORT, NULL, 0) == NULL) {
+        fprintf(stderr, "mysql_real_connect() failed\n");
+        mysql_close(log_conn);
+        return -1;
+    }
+    printf("mysql_real_connect end\n");
 
     while (1) {
-        log_usage();
         sleep(1);
+
+        int login_user_cnt = get_login_user_cnt(log_conn);
+        if (login_user_cnt < 0) {
+            return -1;
+        }
+        int tps = get_tps(log_conn);
+        if (tps < 0) {
+            return -1;
+        }
+        float memory_usage, memory_total_usage;
+        get_memory_usage(&memory_usage, &memory_total_usage);
+        log_usage(login_user_cnt, tps, memory_usage);
 
         current_time = time(NULL);
         if (difftime(current_time, start_time) >= 5) {
-            float max_cpu, avg_cpu, max_db, avg_db, max_mem, avg_mem;
-            calculate_metrics(&max_cpu, &avg_cpu, &max_db, &avg_db, &max_mem, &avg_mem);
-            printf("%f %f\n", avg_mem, max_mem);
-            save_to_db(max_cpu, avg_cpu, max_db, avg_db, max_mem, avg_mem);
+            statistic_t server_statistic;
+            get_statistic(&server_statistic);
+            save_statistic_to_db(statistic_conn, &server_statistic);
             start_time = current_time;
         }
     }
