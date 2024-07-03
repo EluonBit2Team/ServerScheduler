@@ -249,7 +249,7 @@ void save_to_db(float max_cpu, float avg_cpu, float max_db, float avg_db, float 
     printf("mysql_real_connect end\n");
     char query[512];
     snprintf(query, sizeof(query),
-            "INSERT INTO statistic (tps_avg, tps_max, mem_avg, mem_max, access_count_avg, access_count_max) VALUES (%f, %f, %f, %f, %f, %f)"
+            "INSERT INTO statistic (tps_avg, tps_max, mem_avg, mem_max, login_user_cnt_avg, login_user_cnt_max) VALUES (%f, %f, %f, %f, %f, %f)"
             ,random_float(), random_float(), max_mem, avg_mem, random_float(), random_float());
     printf("%s\n", query);
     if (mysql_query(conn, query)) {
